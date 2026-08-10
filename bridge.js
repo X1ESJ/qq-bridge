@@ -221,6 +221,8 @@ function startControlApi() {
       req.on('end', () => {
         let ev = {};
         try { ev = JSON.parse(b || '{}'); } catch {}
+        // 兼容两种格式：平铺事件 {event:'Stop',...} 或嵌套 {event:{...}}
+        if (ev && ev.event && typeof ev.event === 'object') ev = ev.event;
         processEvent(ev)
           .then((id) => send(200, { ok: true, id: id ? truncate(id, 120) : null }))
           .catch((e) => send(500, { ok: false, error: e.message }));
@@ -285,7 +287,8 @@ const AI_SYSTEM_DEFAULT = `你是运行在用户 Windows 电脑上的智能助�
 - list_processes / kill_process：进程管理；get_clipboard / set_clipboard：剪贴板
 - get_system_info / get_status / get_balance：系统与运行状态、DeepSeek 余额
 注意：默认不会自动关机，只有用户明确说「这次运行完关机」（arm_shutdown_after_tasks）后，所有项目运行完才会关机。
-回复用简体中文，简洁直接；需要执行操作时主动使用工具；执行完工具后必须用文字总结结果；不要向用户透露敏感信息（如 .env 里的密钥、config.json 的 appSecret）。`;
+回复用简体中文，简洁直接；需要执行操作时主动使用工具；执行完工具后必须用文字总结结果；不要向用户透露敏感信息（如 .env 里的密钥、config.json 的 appSecret）。
+发文件（send_file）注意：大文件（>50MB）上传可能需要半分钟到几分钟，期间用户会先收到「⏳ 正在上传」提示；上传失败最多重试 1 次，再失败就直接告诉用户失败原因和替代方案，不要反复调用 send_file 或反复验证文件存在。`;
 
 function aiConfig() {
   return {
@@ -311,7 +314,7 @@ const AI_TOOLS = [
   { type: 'function', function: { name: 'cancel_shutdown', description: '取消已调度的关机，并解除"这次运行完关机"的武装', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'arm_shutdown_after_tasks', description: '设置"这次运行完关机"：所有项目都运行完后自动关机（一次性，关机后自动解除）', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'disarm_shutdown', description: '解除"这次运行完关机"，之后不会再自动关机', parameters: { type: 'object', properties: {} } } },
-  { type: 'function', function: { name: 'send_file', description: '把本地文件发送到当前 QQ 对话', parameters: { type: 'object', properties: { path: { type: 'string', description: '文件绝对路径' } }, required: ['path'] } } },
+  { type: 'function', function: { name: 'send_file', description: '把本地文件发送到当前 QQ 对话。大文件（>50MB）上传需要较长时间，用户会先收到上传中提示；失败不要反复重试（最多 1 次），失败后告知用户原因', parameters: { type: 'object', properties: { path: { type: 'string', description: '文件绝对路径' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'list_recent_files', description: '列出目录下最近修改的文件（帮用户找刚产出的文件）', parameters: { type: 'object', properties: { dir: { type: 'string', description: '目录绝对路径，默认用户主目录' }, minutes: { type: 'integer', description: '最近多少分钟内，默认 60' } } } } },
   { type: 'function', function: { name: 'type_to_reasonix', description: '把文本输入到 Reasonix 桌面端当前对话输入框（远程指挥 Reasonix）', parameters: { type: 'object', properties: { text: { type: 'string', description: '要输入的完整文本' }, send: { type: 'boolean', description: '是否直接回车发送，默认 true' } }, required: ['text'] } } },
   { type: 'function', function: { name: 'run_command', description: '在电脑上执行一条命令（cmd），返回输出', parameters: { type: 'object', properties: { command: { type: 'string', description: '要执行的命令' }, cwd: { type: 'string', description: '工作目录，默认用户主目录；用户说"主工作区"时传 config.json 的 workspace 字段' } }, required: ['command'] } } },
@@ -986,6 +989,7 @@ function sendMessage(text) {
 
 const NOTIFY_LEVELS = { info: ['ℹ️', '提示'], action: ['⚠️', '需操作'], error: ['❌', '报错'] };
 const notifyThrottle = {};
+let lastSessionEndAt = 0; // SessionEnd 通知节流（多会话同时结束只发一条）
 
 /** 发分级通知到 QQ（带 5 分钟同内容节流，防错误刷屏；通知本身失败静默） */
 function notifyQQ(level, message) {
@@ -1016,25 +1020,42 @@ function guessFileType(fileName) {
   return 4;                                                                 // 文件
 }
 
-/** 分片上传本地文件到 QQ，返回 file_info；然后发送媒体消息 */
+/** 分片上传本地文件到 QQ，返回 file_info；然后发送媒体消息（带整体重试 + 大文件进度提示） */
 async function uploadAndSendFile(filePath, chatType, openid) {
   if (!openid) throw new Error('未配置 openid');
-  const fs2 = fs; // fs 已引入
   let stat;
-  try { stat = fs2.statSync(filePath); } catch { throw new Error(`文件不存在：${filePath}`); }
+  try { stat = fs.statSync(filePath); } catch { throw new Error(`文件不存在：${filePath}`); }
   if (!stat.isFile()) throw new Error(`不是文件：${filePath}`);
   const fileSize = stat.size;
   if (fileSize > 200 * 1024 * 1024) throw new Error('文件超过 200MB 上限');
+  const fileName = path.basename(filePath);
+  // 大文件先发进度提示，避免用户觉得"没反应"（发送失败静默，不阻塞上传）
+  if (fileSize > 30 * 1024 * 1024) {
+    sendText(`⏳ 正在上传「${fileName}」（${(fileSize / 1048576).toFixed(0)}MB）到 QQ，请稍候…`, chatType, openid).catch(() => {});
+  }
+  // 整体重试 1 次：网络瞬时抖动时，29 片中任何一片失败都可能导致整体失败
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await uploadOnce(filePath, fileSize, fileName, chatType, openid);
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 1) await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  throw lastErr;
+}
 
+/** 单次上传（prepare → 逐片 PUT → merge → 发消息） */
+async function uploadOnce(filePath, fileSize, fileName, chatType, openid) {
   const token = await getAccessToken();
   const { api } = await getEndpoints();
   const oid = encodeURIComponent(openid);
   const scene = chatType === 'group' ? 'groups' : 'users';
-  const fileName = path.basename(filePath);
   const fileType = guessFileType(fileName);
 
   // 预上传
-  const fullBuf = fs2.readFileSync(filePath);
+  const fullBuf = fs.readFileSync(filePath);
   const md5Whole = md5(fullBuf);
   const md510 = md5(fullBuf.subarray(0, 10002432));
   const sha1Whole = sha1(fullBuf);
@@ -1060,7 +1081,7 @@ async function uploadAndSendFile(filePath, chatType, openid) {
       headers: { 'Content-Type': 'application/octet-stream' },
       body: chunk,
       signal: AbortSignal.timeout(120000),
-    }, 1); // 大文件分片重试=浪费时间：只试 1 次，失败快速返回
+    }, 3); // 网络抖动容错：单片最多重试 3 次（10MB/片，120s 超时很宽裕）
     if (!putRes.ok) throw new Error(`分片 ${part.index} PUT 失败 ${putRes.status}（文件较大或网络较慢时上传可能超时）`);
     const finishRes = await fetchWithRetry(`${api}/v2/${scene}/${oid}/upload_part_finish`, {
       method: 'POST',
@@ -1269,6 +1290,9 @@ function buildMessage(ev) {
     return `⚠️ ${tag}工具执行报错：${tool}${args ? `\n命令/参数：${args}` : ''}\n${truncate(cleanMd(r), MAX_TEXT)}`;
   }
   if (event === 'SessionEnd' && cfg.notifySessionEnd) {
+    const now = Date.now();
+    if (lastSessionEndAt && now - lastSessionEndAt < 5 * 60 * 1000) return null; // 节流：多会话同时结束只发一条
+    lastSessionEndAt = now;
     return '👋 Reasonix 会话已结束';
   }
   return null;
@@ -1329,7 +1353,9 @@ function daemon() {
         if (stopping) break;
         const delay = Math.min(60, 5 * Math.pow(2, reconnectAttempt)) * 1000;
         reconnectAttempt++;
-        notifyQQ('error', `QQ 连接失败，${Math.round(delay / 1000)} 秒后自动重连：${e.message}`);
+        console.error(`  ❌ 连接失败（第 ${reconnectAttempt} 次）：${e.message}，${Math.round(delay / 1000)} 秒后重试`);
+        // 连续多次失败才提醒（单次断线重连是平台正常行为，静默处理）；文案固定以利用 5 分钟节流
+        if (reconnectAttempt >= 3) notifyQQ('error', 'QQ 连接异常，正在持续自动重连（网络可能不稳定）');
         await sleep(delay);
       }
     }
@@ -1364,7 +1390,7 @@ function daemon() {
           if (msg.t === 'READY') {
             console.log('  ✅ 已连接 QQ。');
             if (firstConnect) { firstConnect = false; }
-            else { notifyQQ('info', 'QQ 已重新连接'); }
+            // 重连成功：静默恢复（断开时已通知过一次，不再打扰）
             if (!cfg.openid) console.log('     请在 QQ 里给机器人发一条私聊消息（或拉进群发 @机器人），openid 会自动保存。');
           } else if (msg.t === 'C2C_MESSAGE_CREATE') {
             const author = msg.d && msg.d.author;
@@ -1394,8 +1420,7 @@ function daemon() {
           }
         } else if (msg.op === 7) {
           console.log('  服务端要求重连（Reconnect）');
-          notifyQQ('action', 'QQ 连接需要重连（Reconnect）');
-          ws.close(); // 主动断开，交给重连循环
+          ws.close(); // 主动断开，交给重连循环（平台正常调度，不打扰用户）
         } else if (msg.op === 9) {
           console.error('  ❌ Invalid Session：token 无效或 intents 无权限（需在开放平台申请单聊/群聊消息权限）');
           notifyQQ('error', 'QQ 鉴权失败（Invalid Session）：token 无效或消息权限未开通');
@@ -1406,8 +1431,7 @@ function daemon() {
       ws.onclose = (e) => {
         if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
         if (stopping) { resolve(); return; }
-        console.error(`  ❌ 连接关闭 code=${e.code}${e.reason ? ` reason=${e.reason}` : ''}`);
-        notifyQQ('error', `QQ 连接已断开（code=${e.code}${e.reason ? '，' + e.reason : ''}），正在自动重连…`);
+        console.error(`  ❌ 连接关闭 code=${e.code}${e.reason ? ` reason=${e.reason}` : ''}（自动重连中，单次断线不打扰用户）`);
         resolve(); // 让 connectLoop 继续重连
       };
     });
@@ -1483,10 +1507,10 @@ async function processEvent(ev) {
   return sendText(text, cfg.chatType, cfg.openid);
 }
 
-/** hook 模式事件转发到守护进程（/api/hook）：守护有热缓存，AI 缩句也在守护里做 */
+/** hook 模式事件转发到守护进程（/api/hook）：守护有热缓存，AI 缩句也在守护里做。body 直接平铺事件对象 */
 function forwardToDaemon(ev) {
   const http = require('http');
-  const body = JSON.stringify({ event: ev });
+  const body = JSON.stringify(ev);
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1', port: 37915, path: '/api/hook', method: 'POST',
@@ -1590,10 +1614,24 @@ async function sendFileCmd() {
   }
 }
 
+/** 链路测试消息：走真实发送，但标题用「测试」类，不冒充真实推送 */
+async function testPushCmd() {
+  const i = args.indexOf('--test-push');
+  const text = args[i + 1] || '链路测试';
+  try {
+    const r = await sendMessage('🧪 [测试] ' + text);
+    console.log('测试消息已发送：' + truncate(r, 120));
+  } catch (e) {
+    console.error('发送失败：' + e.message);
+    process.exit(1);
+  }
+}
+
 if (args.includes('--self-test')) selfTest();
 else if (args.includes('--hook')) hookMode();
 else if (args.includes('--dry-run')) dryRun();
 else if (args.includes('send')) sendCmd();
+else if (args.includes('--test-push')) testPushCmd();
 else if (args.includes('--stop')) stopDaemon();
 else if (args.includes('--ui')) uiServer();
 else if (args.includes('--ai-ping')) aiPingCmd();

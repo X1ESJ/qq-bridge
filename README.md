@@ -1,194 +1,218 @@
-# qq-bridge
+# qq-bridge — Reasonix 桌面端事件 → QQ 官方机器人推送（exe，静默后台）
 
-把你的 **Windows 电脑** 接入 **QQ 机器人**：Reasonix 桌面事件实时推送、DeepSeek AI 聊天、远程控制电脑（关机 / 发文件 / 截屏 / 执行命令 / 指挥 Reasonix…）。
+把桌面端跑任务时的状态直接推到你的 QQ（官方 QQ 开放平台机器人），**不依赖 Reasonix
+内置 bot gateway**，由本程序直接调用 QQ 开放平台 OpenAPI。
 
-无需自己搭建服务器，机器人直接通过 **QQ 开放平台官方 API** 收发消息，本机常驻守护进程。
+## 🤖 QQ 聊天 = AI 助手（DeepSeek）
 
-> 本项目最初为解决「Reasonix 内置 IM Bot 无法连通」而写，现已扩展为通用的 QQ 远程控制助手。
+给机器人发**私聊消息**（或群里 @机器人）→ 走 **DeepSeek（deepseek-v4-flash）** 智能回复，
+AI 可调用工具控制电脑：
 
----
+| 工具 | 作用 | 示例说法 |
+| --- | --- | --- |
+| `arm_shutdown_after_tasks` | 设置「这次运行完关机」（一次性） | “这次运行完关机” |
+| `disarm_shutdown` / `cancel_shutdown` | 解除自动关机 / 取消已调度关机 | “取消关机” |
+| `shutdown_computer` | 立即延时关机 | “30 秒后关机” |
+| `send_file` | 发文件到 QQ | “把 test-upload.txt 发给我”（自动分片上传） |
+| `list_recent_files` | 列出最近修改的文件 | “刚才产出的文件有哪些” |
+| `take_screenshot` | 截屏并发送到 QQ | “截个屏” |
+| `type_to_reasonix` | 远程输入到 Reasonix 当前对话 | “让 Reasonix 跑一下测试” |
+| `run_command` / `run_powershell` | 执行 cmd 命令 / PowerShell 代码 | “运行 ipconfig” / “执行这段 PowerShell” |
+| `reboot_computer` / `lock_computer` | 重启 / 锁屏 | “重启电脑” / “锁屏” |
+| `read_file` / `search_files` | 读文件内容 / 按名字找文件 | “读一下 xxx” / “找 apk 文件” |
+| `get_disk_usage` / `get_system_info` | 磁盘空间 / 系统信息 | “磁盘还剩多少” |
+| `set_reminder` | 定时提醒（到点发 QQ） | “10 分钟后提醒我喝水” |
+| `wait_for_file` | 等文件出现（构建产物），出现后通知/发送 | “等 APK 构建出来发给我” |
+| `open_url` / `open_path` | 打开网址 / 文件路径 | “打开百度” |
+| `list_processes` / `kill_process` | 进程管理 | “结束 notepad” |
+| `get_clipboard` / `set_clipboard` | 剪贴板读写 | “复制这段文字” |
+| `get_system_info` / `get_status` | 系统与运行状态 | “电脑什么配置” |
 
-## ✨ 功能
+密钥：`%APPDATA%\reasonix\.env` 的 `DEEPSEEK_API_KEY`；模型/开关/提示词可在设置页改。
 
-| 类别 | 能力 |
+| 场景 | 触发事件 | 消息 |
+| --- | --- | --- |
+| 需要审核（工具/记忆审批等） | `Notification` | 🔔 Reasonix 需要你处理 |
+| 一轮对话结束 | `Stop` | ✅ 本轮对话结束（带 turn） |
+| 工具执行报错 | `PostToolUse` | ⚠️ 已按需求**关闭**（config.json `notifyPostToolError=false`） |
+| 会话结束（可选，默认关） | `SessionEnd` | 👋 会话已结束 |
+
+消息会自动去掉 markdown 格式符号（`**`、`#`、`-`、`>`、`$`、`` ` `` 等），只保留文字；
+每条消息带项目名，如 `✅ [project-a] 本轮对话结束（turn 2）`。
+
+## 开机自启动 + 后台静默（已配置 ✅）
+
+已写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`：
+
+```
+qq-bridge = "…\qq-bridge\bridge.exe" --daemon-bg
+```
+
+- **开机自动启动**，无窗口静默运行（exe 已改为 GUI 子系统，不弹黑窗）
+- 日志写入 `qq-bridge\bridge.log`（exe 同目录），pid 写入 `bridge.pid`
+- 双击 `bridge.exe` 与自启动行为一致（静默后台 + 写日志）
+
+### 手动控制
+
+| 操作 | 命令 |
 | --- | --- |
-| 📨 事件推送 | Reasonix 桌面端审批 / 对话结束 / 报错 实时推到 QQ（所有窗口/项目生效） |
-| 🤖 AI 聊天 | QQ 里给机器人发消息 → DeepSeek（deepseek-v4-flash）智能回复，支持多轮上下文 |
-| 🧰 电脑控制 | 关机 / 重启 / 锁屏 / 截屏发图 / 发文件 / 找文件 / 执行 cmd & PowerShell / 开网址 / 进程管理 / 剪贴板 / 系统信息 / DeepSeek 余额 |
-| 🎮 指挥 Reasonix | 把文本输入到 Reasonix 桌面端当前对话（剪贴板 + 模拟按键） |
-| 🔌 自动关机 | 说「这次运行完关机」→ 所有项目运行完自动关机（一次性，可取消） |
-| ⏰ 定时提醒 / 等文件 | 「10 分钟后提醒我」「等 APK 构建出来发给我」 |
-| 🖥️ 设置 UI | 浏览器本地设置页：配置、后台聊天、历史记录、余额 |
+| 启动后台守护 | `bridge.exe --daemon-bg`（或直接双击） |
+| 停止后台守护 | `bridge.exe --stop`（读 bridge.pid） |
+| 查看运行状态 | 看 `qq-bridge\bridge.log` 尾部 |
 
----
+> 说明：守护进程只负责保持 QQ 在线连接 / 自动保存 openid / 记录日志。
+> **推送本身不依赖守护进程** —— 桌面端每次发生事件时 hooks 会临时调用
+> `bridge.exe --hook` 发送，守护进程不在也能推。
 
-## 📋 前置要求
+## 推送链路（无需任何窗口）
 
-- **Windows 10 / 11**（依赖 PowerShell 与 cmd）
-- **Node.js 18+**（推荐 20+；开发运行 `node bridge.js`，打包 exe 无需 Node）
-- **QQ 开放平台机器人**：到 [q.qq.com](https://q.qq.com) 创建机器人，获得 `AppID` 与 `AppSecret`（个人用户即可，无需企业认证）
-- **DeepSeek API Key**：[platform.deepseek.com](https://platform.deepseek.com) 申请，模型 `deepseek-v4-flash`（如你的账号没有该模型可换 `deepseek-chat`）
-- （可选）**Reasonix 桌面端**：接收审批/对话结束推送、远程指挥
+`%APPDATA%\reasonix\settings.json` 全局 hooks（桌面端所有窗口/项目生效）：
+`Notification` / `Stop` / `PostToolUse` / `SessionEnd` / `UserPromptSubmit` → 调用 `bridge.exe --hook`
+（读 stdin 事件 payload → **本地转发给守护进程**（`127.0.0.1:37915/api/hook`，毫秒级）→
+守护进程统一发 QQ：token/endpoints 有内存+磁盘缓存，AI 缩句也在守护内异步做）。
+守护进程未运行时，`--hook` 自动回退直连（走磁盘缓存，也比冷启动快）。
+改动过代码后记得**重启桌面端**。
 
----
+## 设置界面（UI）
 
-## 🚀 快速开始（首次配置约 10 分钟）
+**双击 `打开设置.lnk`**（无黑窗；或 `打开设置.bat`，会闪一下黑窗；或命令行 `bridge.exe --ui`）
+→ 浏览器打开本地设置页
+（`http://127.0.0.1:37914`，仅本机可访问，零依赖）：
 
-### 1. 下载与准备
+- 🔌 **这次运行完关机**：开关 + 连续无活动分钟数（默认 5）+ 关机倒计时秒数（默认 60）
+  - **默认不自动关机**；在 QQ 对机器人说「这次运行完关机」（或在这里打开开关）才启用，**一次性**（关机后自动解除）
+  - 判定：任务每有事件（工具执行 / 对话结束 / 你的输入）自动刷新「最后活动」；
+    守护进程检测到**连续 N 分钟无任何活动**（所有项目都停了）→ 先发 QQ 通知 → 执行
+    `shutdown /s /t <秒>` 倒计时关机；任务重新活动则**自动取消**关机
+  - 取消：设置页「取消关机」按钮 / 对机器人说“取消关机”，或命令行 `shutdown /a`
+- 🔔 消息推送开关：工具报错推送、会话结束推送
+- ℹ️ 状态：发送目标、关机调度、最后活动/事件/项目
+- 按钮：保存设置、发送测试消息
+- 页面 30 分钟无操作自动退出（防残留进程）
 
-```bash
-git clone https://github.com/<你的用户名>/qq-bridge.git
-cd qq-bridge
-```
+> 自动关机由**守护进程**执行（开机自启动已配置，每 30 秒检查一次）。
+> 推送不依赖守护进程，但自动关机依赖；确保 `--daemon-bg` 在运行。
 
-### 2. 创建配置文件
+## 命令行
 
-```bash
-copy config.example.json config.json
-```
+| 命令 | 作用 |
+| --- | --- |
+| `bridge.exe`（双击/无参数） | 静默后台守护：连接 QQ、写 bridge.log |
+| `bridge.exe --daemon-bg` | 同上（自启动项用） |
+| `bridge.exe --ui` | 打开设置页（浏览器） |
+| `bridge.exe --stop` | 停止后台守护进程 |
+| `bridge.exe --hook` | hook 模式（settings.json 的 hooks 调用） |
+| `bridge.exe --dry-run` | 只打印将推送的内容，不发 |
+| `bridge.exe send --text "…"` | 手动发一条测试消息 |
+| `bridge.exe --ai-ping [问题]` | 测试 DeepSeek 连通（不发 QQ） |
+| `bridge.exe --send-file <路径>` | 测试发一个文件到 QQ |
+| `bridge.exe --tool-test <工具名> '<json参数>'` | 直接调用某个 AI 工具（如 `--tool-test get_system_info`） |
+| `bridge.exe --status-check` | 查看 Reasonix 活跃会话数（自动关机判定用） |
+| `bridge.exe --self-test` | 检查凭据/token/gateway/配置（加 `--send` 可真实发一条） |
 
-编辑 `config.json`，填入必填项（其余保持默认即可）：
+## config.json（exe 旁）
 
-```jsonc
+```json
 {
-  "appId": "你的QQ机器人AppID",        // 必填
-  "appSecret": "你的QQ机器人AppSecret", // 必填（或删掉此项，改用环境变量 QQ_BOT_APP_SECRET）
-  "workspace": "C:/你的主工作区路径",    // 可选：AI 认为的"主工作区"
-  "aiModel": "deepseek-v4-flash"       // 可选：DeepSeek 模型
+  "appId": "1905378872",
+  "appSecret": "",              // 留空自动读 %APPDATA%\\reasonix\\.env 的 QQ_BOT_APP_SECRET
+  "chatType": "user",           // user=私聊 / group=群聊
+  "openid": "…",                // 发送目标；守护模式收到你的消息后自动写入
+  "maxText": 500,
+  "notifySessionEnd": false,    // 会话结束推送，默认关
+  "notifyPostToolError": false, // 工具报错推送，已按需求关闭
+  "autoShutdownOnDone": false, // 「这次运行完关机」，默认关；QQ 对机器人说「这次运行完关机」即开启（一次性）
+  "idleMinutes": 5,             // 连续无活动多少分钟判定为完成
+  "shutdownDelay": 60,          // 关机前倒计时秒数
+  "shutdownMode": "all_done",  // all_done=所有项目结束（无活跃会话）才关机；idle=仅空闲
+  "aiEnabled": true,            // QQ 消息走 AI 回复
+  "aiModel": "deepseek-v4-flash",
+  "aiSystem": ""               // 留空用内置默认提示词
 }
 ```
 
-DeepSeek 密钥两种方式二选一：
-- 在 `config.json` 加 `"aiApiKey": "sk-..."`；或
-- 设置环境变量 `DEEPSEEK_API_KEY=sk-...`
+## 已验证 ✅
 
-### 3. 启动守护进程
+- 凭据/token/gateway 获取、WebSocket 鉴权、真实发送到你 QQ 均成功
+- 后台守护经任务计划程序（独立于终端）启动后**稳定常驻**，`--stop` 可正常停止
+- 开机自启动注册表项已写入并验证
+- markdown 清理（`**`/`#`/`-`/`>`/`$` 等）与项目名显示已验证
+- 工具报错推送已关闭；`bridge.exe --hook` 端到端发送成功
+- **自动关机**：空闲超时触发（dry 模式日志确认）、活动刷新自动取消、UI API 保存全部验证
+- **UI**：设置页 GET/POST 配置、取消关机、测试消息 API 全部验证
 
-```bash
-node bridge.js --daemon-bg
-```
+## 安全与稳定性（本轮新增）
 
-> 无窗口后台运行；日志写在同目录 `bridge.log`，可用 `node bridge.js --stop` 停止。
-> 想让**开机自启**：把 `bridge.js` 打成 exe（见「构建 exe」），然后将
-> `bridge.exe --daemon-bg` 加入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
+- **访问白名单**：默认只响应 config.json 里保存的 openid（你自己）；其他人给 bot 发消息会被忽略。
+  如需放行更多 QQ，在 config.json 的 `allowedOpenids` 数组里加 openid（UI 不提供，避免误改）。
+- **AI 回复长消息自动分段**（每段 ≤3800 字符，长回复完整送达）
+- **对话历史持久化**（state.json，守护重启不丢；每对话保留最近 20 条）
+- **日志轮转**（bridge.log 超过 2MB 自动备份为 bridge.log.old）
+- DeepSeek 调用带重试；工具循环耗尽会返回已执行摘要而非空回复
+- **AI 回复字数上限**（config `maxAiReply`，默认 400，UI 可调）：系统提示词直接约束 AI
+  "每次回复控制在 N 字以内"，Stop 通知的精简也按此字数压缩（不是事后截断）
+- **报错直接发 QQ**：AI 处理失败（如余额不足 402 / 超时）、推送失败，会把错误信息
+  原样发到 QQ（⚠️ AI 处理出错：…），不会只写日志让你蒙在鼓里
+- **DeepSeek 余额**：设置页状态卡片显示账号余额（官方 /user/balance 接口），
+  QQ 里对机器人说"余额多少"（AI 工具 get_balance）、命令行 `bridge.exe --balance` 也能查
+- **会话费用**：Reasonix 本地接口（127.0.0.1:37913）未运行，暂无法获取；
+  若桌面端重启后 gateway 起来，状态卡片会自动显示
 
-### 4. 建立 QQ 会话（自动获取你的 openid）
+## 结束通知格式与后台对话（本轮新增）
 
-```bash
-node bridge.js
-```
+- **结束通知**：`✅ [工作区] 本轮对话结束（turn N）`；**内容不直接发全文**：把 Reasonix 会话回复的**原文完整**交给 DeepSeek
+  **缩句为 200 字以内**后发送（不删格式符号、不预截断）；可在设置页关掉
+- **后台对话（不经 QQ）**：设置页新增「💬 后台对话」卡片——
+  - 查看 AI 对话历史（含 QQ 对话与后台对话，按对话分组）
+  - 输入框直接给 AI 发消息，回复显示在页面（走守护进程 `127.0.0.1:37915` 的 API，与 QQ 对话共享 AI 上下文）
 
-保持窗口运行，然后**在 QQ 里给你的机器人发一条消息**。控制台会打印：
+## 暂未实现（按需再开）
 
-```
-✅ 已保存私聊目标 user_openid=xxxxxxxxxxxxxxxxxxxx
-```
+- **图片理解**：你发图片给机器人 → AI 看图（需 DeepSeek 视觉模型，当前 deepseek-v4-flash 无视觉）
+- **语音消息**转文字（需额外 ASR 服务）
+- **AI 处理中可打断**（"停"中止当前 DeepSeek 调用，目前只能等它 2 分钟超时）
+- **局域网/公网远程访问** UI（目前仅本机 127.0.0.1）
+- **Reasonix 会话级联控**（暂停/恢复/查看历史，Reasonix 未提供相关接口）
 
-你的 openid 已自动写入 `config.json`（安全白名单：默认只有这个 openid 能指挥 AI）。
+## 文件
 
-> 想用群聊：把机器人拉进群，在群里 @它 发一条消息，会自动切换为群目标。
-
-### 5. 测试
-
-```bash
-node bridge.js send --text "🤖 你好，qq-bridge 已就绪"
-node bridge.js --ai-ping "你好"          # 测试 DeepSeek 连通
-node bridge.js --balance                 # 查看 DeepSeek 余额
-```
-
-QQ 收到消息即全部打通。
-
-### 6. 打开设置页（可选）
-
-```bash
-node bridge.js --ui
-```
-
-浏览器打开本地设置页：配置推送/自动关机/AI、后台直接给 AI 发消息、查看历史与余额。
-
----
-
-## ⚙️ 配置详解（config.json）
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `appId` / `appSecret` | — | QQ 机器人凭据（必填） |
-| `aiApiKey` / `aiModel` / `aiBaseUrl` | env / `deepseek-v4-flash` / `https://api.deepseek.com` | DeepSeek 配置 |
-| `workspace` | 用户主目录 | AI 的"主工作区"，`search_files` 等默认目录 |
-| `chatType` | `user` | `user`=私聊 / `group`=群聊 |
-| `openid` | — | 发送目标，首次收消息自动写入 |
-| `allowedOpenids` | `[]` | 访问白名单；为空时仅 `openid` 可指挥 AI |
-| `summarizeStop` | `true` | 结束通知内容由 AI 缩句（200 字以内）后发送 |
-| `maxAiReply` | `400` | AI 回复字数上限（提示词直接约束） |
-| `autoShutdownOnDone` | `false` | 「这次运行完关机」，说一句话即开启（一次性） |
-| `shutdownMode` | `all_done` | `all_done`=所有项目结束才关 / `idle`=仅空闲 |
-| `idleMinutes` / `shutdownDelay` | `5` / `60` | 空闲判定分钟数 / 关机倒计时秒数 |
-| `notifySessionEnd` / `notifyPostToolError` | `false` / `false` | 会话结束 / 工具报错推送开关 |
-| `aiSystem` | 内置提示词 | 自定义 AI System 提示词 |
-
-> Reasonix 集成（可选）：程序会读 `%APPDATA%\reasonix\.env` 的
-> `REASONIX_BOT_CONTROL_TOKEN` 来查询活跃会话（`all_done` 关机判定），并读取
-> `%APPDATA%\reasonix\settings.json` 的全局 hooks 实现事件推送。不用 Reasonix 也能跑 AI 聊天与远程控制。
-
----
-
-## 🤖 AI 工具（QQ 里对机器人说）
-
-| 你说 | AI 执行 |
+| 文件 | 说明 |
 | --- | --- |
-| 这次运行完关机 / 取消关机 / 30 秒后关机 / 重启 / 锁屏 | 自动关机武装 / 取消 / 延时关机 / 重启 / 锁屏 |
-| 把 xxx 文件发给我 / 刚才产出的文件有哪些 | 发送文件 / 列出最近修改文件 |
-| 截个屏 / 找 apk 文件 / 读一下 xxx | 截屏发图 / 按名字搜文件 / 读文件内容 |
-| 运行 ipconfig / 执行这段 PowerShell | cmd / PowerShell 执行 |
-| 打开百度 / 结束 notepad / 磁盘还剩多少 | 开网址 / 杀进程 / 磁盘用量 |
-| 让 Reasonix 跑一下测试 | 把文本输入到 Reasonix 当前对话并回车 |
-| 10 分钟后提醒我 / 等 APK 构建出来发给我 | 定时提醒 / 等待文件出现后通知 |
-| 余额多少 / 什么状态 | DeepSeek 余额 / 运行状态 |
+| `bridge.exe` | 主程序（GUI 子系统，静默后台） |
+| `打开设置.lnk` / `打开设置.bat` | 双击打开设置页（lnk 无黑窗，bat 闪一下黑窗；vbs 被部分系统拦截已弃用） |
+| `config.json` | 配置（exe 旁） |
+| `bridge.js` | 源码（改完重打包） |
+| `make-exe.py` | 打包后改 GUI 子系统 |
+| `sea-config.json` | Node SEA 打包配置 |
+| `state.json` / `bridge.log` / `bridge.pid` | 运行时生成：活动状态 / 日志 / 守护 pid |
 
-所有工具结果都会用中文总结回复；任何 AI 错误（如余额不足）会**原样发到 QQ**。
+## 重新打包 exe（改 bridge.js 后）
 
----
-
-## 🔐 安全说明
-
-- **密钥不入库**：`config.json`、`state.json`、`*.log` 均被 `.gitignore` 排除，只提交 `config.example.json`
-- **访问白名单**：默认仅你自己的 openid 可指挥 AI，其他 QQ 用户发消息会被忽略
-- **敏感指令确认**：System 提示词要求 AI 不透露密钥，执行危险操作前先与用户确认
-- **仅本机监听**：UI 与后台聊天 API 只绑定 `127.0.0.1`，不对外暴露
-
----
-
-## 🏗️ 构建 exe（可选，免 Node 运行）
-
-使用 Node 官方 SEA（Single Executable Application）打包：
-
-```bash
+```sh
+cd 到本目录
 node --experimental-sea-config sea-config.json
 copy /Y "C:\Program Files\nodejs\node.exe" bridge.exe
 npx --yes postject bridge.exe NODE_SEA_BLOB sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 --overwrite
-python make-exe.py   # 把 exe 改为 GUI 子系统（静默无窗口）
 ```
 
-> exe 未签名，Windows SmartScreen 首次运行可能提示"未知发布者"，点"仍要运行"。
+打包后需把 exe 的 PE Subsystem 改为 2（GUI，静默无窗口）：
+`python` 改 `e_lfanew + 4 + 20 + 68` 处的 2 字节为 `2`（原为 3），
+或用本目录 `make-exe.py`。改完自检：`bridge.exe --self-test >nul 2>&1 && echo OK`。
 
----
+> 未签名，Windows SmartScreen 首次运行可能提示"未知发布者"，点"仍要运行"即可。
 
-## ❓ 常见问题
+## 常见问题
 
-- **机器人收不到/发不出消息**：确认 AppID/AppSecret 正确、机器人已发布（非仅沙箱）、
-  在 QQ 客户端给机器人打开「允许主动发送」
-- **openid 未写入**：先跑 `node bridge.js`（守护）再给机器人发消息
-- **开机误关机**：守护启动会自动清空历史活动状态，只有收到新的任务事件后才开始计时
-- **收不到 Reasonix 推送**：确认桌面端 hooks 配置指向 `bridge.js --hook`（见上）
-- **exe 打不开**：用 `打开设置.bat`（自动回退 `node bridge.js --ui`）
+- **私聊收不到** → QQ 客户端给机器人资料卡打开「允许主动发送」；或改用群聊
+  （把机器人拉进群，守护模式下在群里发一条消息，自动切为群目标）。
+- **想恢复工具报错推送** → config.json `notifyPostToolError` 改回 `true`。
+- **守护进程没起来** → 看 `bridge.log`；`--stop` 后再 `--daemon-bg` 重启。
+- **报错码**：程序输出中文提示（40054013=用户拒收、40034105=无权限、4914=仅沙箱、4915=封禁）。
 
----
+## 技术参考（QQ 开放平台文档 v2）
 
-## 📄 技术参考
-
-- QQ 开放平台 v2 API：access_token `POST /app/getAppAccessToken`；消息 `POST /v2/users/{openid}/messages`（群聊 `groups`）；文件分片上传；WebSocket `wss://api.sgroup.qq.com/websocket`，intents `1<<25`
-- DeepSeek API：`POST /chat/completions`、`GET /user/balance`
-
-## 免责声明
-
-本项目仅供个人学习与自动化使用。远程执行命令、关机、截屏等能力请谨慎授权，使用风险自负。
+- access_token：`POST https://bots.qq.com/app/getAppAccessToken`（或 api.bot.qq.com）
+- 发送单聊：`POST /v2/users/{user_openid}/messages`（msg_type=0, content）
+- 发送群聊：`POST /v2/groups/{group_openid}/messages`
+- 事件订阅：WebSocket `wss://api.sgroup.qq.com/websocket`，intents = 1<<25（GROUP_AND_C2C_EVENT）
+- 鉴权头：`Authorization: QQBot <access_token>`
