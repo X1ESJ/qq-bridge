@@ -1,0 +1,22 @@
+{
+  "appId": "你的QQ机器人AppID",
+  "appSecret": "你的QQ机器人AppSecret",
+  "workspace": "C:/你的主工作区路径",
+  "chatType": "user",
+  "openid": "",
+  "allowedOpenids": [],
+  "maxText": 500,
+  "notifySessionEnd": false,
+  "notifyPostToolError": false,
+  "summarizeStop": true,
+  "autoShutdownOnDone": false,
+  "shutdownMode": "all_done",
+  "idleMinutes": 5,
+  "shutdownDelay": 60,
+  "aiEnabled": true,
+  "aiModel": "deepseek-v4-flash",
+  "aiBaseUrl": "https://api.deepseek.com",
+  "aiApiKey": "",
+  "maxAiReply": 400,
+  "aiSystem": ""
+}
